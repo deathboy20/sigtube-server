@@ -2,6 +2,7 @@
   "name": "sigtrack-tube-server",
   "version": "1.0.0",
   "description": "Backend API for Sigtrack Tube",
+  "type": "commonjs",
   "engines": {
     "node": ">=18.17.0"
   },

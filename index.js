@@ -453,7 +453,11 @@ const initWebDav = async () => {
   }
 };
 
-app.listen(PORT, async () => {
-  await initWebDav();
-  console.log(`Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, async () => {
+    await initWebDav();
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
