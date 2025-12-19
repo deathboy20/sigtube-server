@@ -14,6 +14,28 @@ const upload = multer({ storage: multer.memoryStorage() });
 app.use(cors());
 app.use(express.json());
 
+// Health check
+app.get("/api/health", async (req, res) => {
+  try {
+    const canList = await owncloud.exists("/organizations");
+    const canAdmin = await owncloud.exists("/admin");
+    res.json({
+      status: "ok",
+      owncloud: {
+        organizationsFolderExists: !!canList,
+        adminFolderExists: !!canAdmin,
+      },
+    });
+  } catch (error) {
+    console.error("Health check error:", error);
+    res.status(500).json({
+      status: "error",
+      message: "OwnCloud connectivity failed",
+      details: error.message,
+    });
+  }
+});
+
 // List Organizations (folders in /organizations)
 app.get("/api/orgs", async (req, res) => {
   try {
@@ -34,7 +56,7 @@ app.get("/api/orgs", async (req, res) => {
     if (error.response && error.response.status === 404) {
         return res.json([]);
     }
-    res.status(500).json({ error: "Failed to list organizations" });
+    res.status(500).json({ error: "Failed to list organizations", details: error.message });
   }
 });
 
@@ -81,7 +103,7 @@ app.get("/api/orgs/:orgName", async (req, res) => {
         if (error.response && error.response.status === 404) {
             return res.status(404).json({ exists: false });
         }
-        res.status(500).json({ error: "Error checking org" });
+        res.status(500).json({ error: "Error checking org", details: error.message });
     }
 });
 
