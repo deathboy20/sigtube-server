@@ -39,6 +39,10 @@ app.get("/api/health", async (req, res) => {
 // Debug Connectivity
 app.get("/api/debug-connection", async (req, res) => {
     const targetUrl = process.env.OWNCLOUD_URL;
+    const username = process.env.OWNCLOUD_USERNAME;
+    // Mask password in response
+    const hasPassword = !!process.env.OWNCLOUD_PASSWORD;
+    
     const https = require('https');
     const http = require('http');
     
@@ -50,11 +54,16 @@ app.get("/api/debug-connection", async (req, res) => {
     const client = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
 
+    // Create Basic Auth header
+    const authHeader = 'Basic ' + Buffer.from(`${username}:${process.env.OWNCLOUD_PASSWORD}`).toString('base64');
+
     const info = {
         host: url.hostname,
         port: port,
         protocol: url.protocol,
-        target: targetUrl
+        target: targetUrl,
+        username: username,
+        hasPassword: hasPassword
     };
 
     const reqTest = client.request({
@@ -62,20 +71,30 @@ app.get("/api/debug-connection", async (req, res) => {
         port: port,
         path: url.pathname,
         method: 'PROPFIND', // WebDAV method
-        timeout: 5000
+        headers: {
+            'Authorization': authHeader,
+            'Depth': '1'
+        },
+        timeout: 10000
     }, (resTest) => {
-        res.json({
-            ...info,
-            status: "connected",
-            statusCode: resTest.statusCode,
-            headers: resTest.headers
+        let data = '';
+        resTest.on('data', chunk => data += chunk);
+        resTest.on('end', () => {
+            res.json({
+                ...info,
+                status: resTest.statusCode >= 200 && resTest.statusCode < 300 ? "success" : "auth_failed_or_error",
+                statusCode: resTest.statusCode,
+                statusMessage: resTest.statusMessage,
+                headers: resTest.headers,
+                bodySnippet: data.substring(0, 200) // Show part of body to see XML error
+            });
         });
     });
 
     reqTest.on('error', (e) => {
         res.status(500).json({
             ...info,
-            status: "failed",
+            status: "connection_failed",
             error: e.message,
             code: e.code
         });
