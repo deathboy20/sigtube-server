@@ -17,10 +17,10 @@ const httpAgent = new http.Agent(agentOptions);
 const httpsAgent = new https.Agent(agentOptions);
 
 const owncloud = createClient(
-  process.env.OWNCLOUD_URL || "http://95.111.226.24:81/remote.php/dav/files/test/",
+  process.env.OWNCLOUD_URL,
   {
-    username: process.env.OWNCLOUD_USERNAME || "test",
-    password: process.env.OWNCLOUD_PASSWORD || "123456",
+    username: process.env.OWNCLOUD_USERNAME,
+    password: process.env.OWNCLOUD_PASSWORD,
     httpAgent: httpAgent,
     httpsAgent: httpsAgent,
   }

@@ -36,6 +36,63 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
+// Debug Connectivity
+app.get("/api/debug-connection", async (req, res) => {
+    const targetUrl = process.env.OWNCLOUD_URL;
+    const https = require('https');
+    const http = require('http');
+    
+    if (!targetUrl) {
+        return res.status(500).json({ error: "OWNCLOUD_URL not set" });
+    }
+
+    const url = new URL(targetUrl);
+    const client = url.protocol === 'https:' ? https : http;
+    const port = url.port || (url.protocol === 'https:' ? 443 : 80);
+
+    const info = {
+        host: url.hostname,
+        port: port,
+        protocol: url.protocol,
+        target: targetUrl
+    };
+
+    const reqTest = client.request({
+        host: url.hostname,
+        port: port,
+        path: url.pathname,
+        method: 'PROPFIND', // WebDAV method
+        timeout: 5000
+    }, (resTest) => {
+        res.json({
+            ...info,
+            status: "connected",
+            statusCode: resTest.statusCode,
+            headers: resTest.headers
+        });
+    });
+
+    reqTest.on('error', (e) => {
+        res.status(500).json({
+            ...info,
+            status: "failed",
+            error: e.message,
+            code: e.code
+        });
+    });
+
+    reqTest.on('timeout', () => {
+        reqTest.destroy();
+        res.status(504).json({
+            ...info,
+            status: "timeout",
+        });
+    });
+
+    reqTest.end();
+});
+
+
 // List Organizations (folders in /organizations)
 app.get("/api/orgs", async (req, res) => {
   try {
