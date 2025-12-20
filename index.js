@@ -11,7 +11,27 @@ dotenv.config();
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.use(cors());
+// CORS Configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',') 
+    : [];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        
+        // Check if origin is in the allowed list
+        if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 // Health check
@@ -36,80 +56,7 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// Debug Connectivity
-app.get("/api/debug-connection", async (req, res) => {
-    const targetUrl = process.env.OWNCLOUD_URL;
-    const username = process.env.OWNCLOUD_USERNAME;
-    // Mask password in response
-    const hasPassword = !!process.env.OWNCLOUD_PASSWORD;
-    
-    const https = require('https');
-    const http = require('http');
-    
-    if (!targetUrl) {
-        return res.status(500).json({ error: "OWNCLOUD_URL not set" });
-    }
 
-    const url = new URL(targetUrl);
-    const client = url.protocol === 'https:' ? https : http;
-    const port = url.port || (url.protocol === 'https:' ? 443 : 80);
-
-    // Create Basic Auth header
-    const authHeader = 'Basic ' + Buffer.from(`${username}:${process.env.OWNCLOUD_PASSWORD}`).toString('base64');
-
-    const info = {
-        host: url.hostname,
-        port: port,
-        protocol: url.protocol,
-        target: targetUrl,
-        username: username,
-        hasPassword: hasPassword
-    };
-
-    const reqTest = client.request({
-        host: url.hostname,
-        port: port,
-        path: url.pathname,
-        method: 'PROPFIND', // WebDAV method
-        headers: {
-            'Authorization': authHeader,
-            'Depth': '1'
-        },
-        timeout: 10000
-    }, (resTest) => {
-        let data = '';
-        resTest.on('data', chunk => data += chunk);
-        resTest.on('end', () => {
-            res.json({
-                ...info,
-                status: resTest.statusCode >= 200 && resTest.statusCode < 300 ? "success" : "auth_failed_or_error",
-                statusCode: resTest.statusCode,
-                statusMessage: resTest.statusMessage,
-                headers: resTest.headers,
-                bodySnippet: data.substring(0, 200) // Show part of body to see XML error
-            });
-        });
-    });
-
-    reqTest.on('error', (e) => {
-        res.status(500).json({
-            ...info,
-            status: "connection_failed",
-            error: e.message,
-            code: e.code
-        });
-    });
-
-    reqTest.on('timeout', () => {
-        reqTest.destroy();
-        res.status(504).json({
-            ...info,
-            status: "timeout",
-        });
-    });
-
-    reqTest.end();
-});
 
 
 // List Organizations (folders in /organizations)
