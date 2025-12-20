@@ -16,6 +16,10 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',') 
     : [];
 
+if (allowedOrigins.length === 0) {
+    console.warn("WARNING: ALLOWED_ORIGINS environment variable is not set. CORS will block all requests.");
+}
+
 app.use(cors({
     origin: function (origin, callback) {
         // Allow requests with no origin (like mobile apps or curl requests)
@@ -25,6 +29,7 @@ app.use(cors({
         if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
             callback(null, true);
         } else {
+            console.warn(`Blocked CORS request from origin: ${origin}`);
             callback(new Error('Not allowed by CORS'));
         }
     },
