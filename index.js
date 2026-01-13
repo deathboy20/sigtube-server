@@ -5,11 +5,31 @@ const { owncloud } = require("./storage/owncloud");
 const { processImage, processVideo } = require("./watermark");
 const dotenv = require("dotenv");
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
 
 dotenv.config();
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
+
+// Use disk storage for better large file handling on memory-constrained servers (like Render)
+// Files are stored in the system's temp directory
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, os.tmpdir());
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: {
+        fileSize: 500 * 1024 * 1024, // Limit to 500MB (adjust as needed for Render plan)
+    }
+});
 
 // CORS Configuration
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
@@ -154,12 +174,18 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
     // Upload logo if provided
     if (logoFile) {
         const logoPath = `/organizations/${orgName}/logo${path.extname(logoFile.originalname)}`;
-        await owncloud.putFileContents(logoPath, logoFile.buffer, { overwrite: true });
+        const buffer = fs.readFileSync(logoFile.path);
+        await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
+        // Clean up temp file
+        fs.unlinkSync(logoFile.path);
     }
 
     res.json({ success: true, message: `Organization ${orgName} created` });
   } catch (error) {
     console.error("Create org error:", error);
+    // Cleanup temp file if error
+    if (logoFile && fs.existsSync(logoFile.path)) fs.unlinkSync(logoFile.path);
+    
     // 405 means it might already exist
     if (error.response && error.response.status === 405) {
         return res.json({ success: true, message: `Organization ${orgName} already exists` });
@@ -192,11 +218,16 @@ app.post("/api/admin/logo", upload.single("logo"), async (req, res) => {
 
         // Upload new logo
         const logoPath = `/admin/logo${path.extname(logoFile.originalname)}`;
-        await owncloud.putFileContents(logoPath, logoFile.buffer, { overwrite: true });
+        const buffer = fs.readFileSync(logoFile.path);
+        await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
+        
+        // Clean up temp file
+        fs.unlinkSync(logoFile.path);
 
         res.json({ success: true, message: "Admin logo updated" });
     } catch (error) {
         console.error("Admin logo upload error:", error);
+        if (logoFile && fs.existsSync(logoFile.path)) fs.unlinkSync(logoFile.path);
         res.status(500).json({ error: "Failed to upload admin logo" });
     }
 });
@@ -260,12 +291,15 @@ app.post("/api/orgs/:orgName/update", upload.single("logo"), async (req, res) =>
             }
             
             const logoPath = `/organizations/${targetOrgName}/logo${path.extname(logoFile.originalname)}`;
-            await owncloud.putFileContents(logoPath, logoFile.buffer, { overwrite: true });
+            const buffer = fs.readFileSync(logoFile.path);
+            await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
+            fs.unlinkSync(logoFile.path);
         }
 
         res.json({ success: true, message: "Organization updated", newName: targetOrgName });
     } catch (error) {
         console.error("Update org error:", error);
+        if (logoFile && fs.existsSync(logoFile.path)) fs.unlinkSync(logoFile.path);
         res.status(500).json({ error: "Failed to update organization" });
     }
 });
@@ -279,30 +313,62 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     return res.status(400).json({ error: "Missing file, orgName, or folder" });
   }
 
-  let buffer = file.buffer;
   const mimeType = file.mimetype;
+  let uploadPath = file.path;
+  let isTempFile = true; // Track if we need to delete uploadPath later
 
   // Watermark Processing
   try {
       if (mimeType.startsWith('image/')) {
+          // Images are small, read to buffer
+          let buffer = fs.readFileSync(file.path);
           buffer = await processImage(buffer, orgName);
+          // Overwrite the temp file with processed buffer
+          fs.writeFileSync(file.path, buffer);
+          uploadPath = file.path;
       } else if (mimeType.startsWith('video/')) {
-          // Note: Inline video processing may timeout for large files.
-          // Ideally use a job queue.
-          buffer = await processVideo(buffer, orgName);
+          // Videos use path-based processing
+          // processVideo now takes path and returns output path
+          const processedPath = await processVideo(file.path, orgName);
+          
+          // If processed path is different (success), we use it.
+          // If it failed, it returns original path.
+          if (processedPath !== file.path) {
+              // Delete original temp file as we have a new output file
+              fs.unlinkSync(file.path);
+              uploadPath = processedPath;
+          }
       }
   } catch (err) {
       console.error("Watermark processing failed, uploading original.", err);
   }
 
-  const path = `/organizations/${orgName}/${folder}/${file.originalname}`;
+  const remotePath = `/organizations/${orgName}/${folder}/${file.originalname}`;
 
   try {
-    await owncloud.putFileContents(path, buffer, { overwrite: true });
-    res.json({ success: true, path });
+    // Use stream for upload to handle large files efficiently
+    const readStream = fs.createReadStream(uploadPath);
+    const writeStream = owncloud.createWriteStream(remotePath);
+    
+    // Pipe data
+    readStream.pipe(writeStream);
+
+    // Wait for finish
+    await new Promise((resolve, reject) => {
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+        readStream.on('error', reject);
+    });
+
+    res.json({ success: true, path: remotePath });
   } catch (error) {
     console.error("Upload error:", error);
     res.status(500).json({ error: "Upload failed" });
+  } finally {
+      // Clean up temp file(s)
+      if (fs.existsSync(uploadPath)) {
+          fs.unlinkSync(uploadPath);
+      }
   }
 });
 

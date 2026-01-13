@@ -90,17 +90,15 @@ async function processImage(fileBuffer, orgName) {
 }
 
 // Process Video
-async function processVideo(fileBuffer, orgName) {
-    console.log(`[Watermark] Processing video for ${orgName}`);
+async function processVideo(inputPath, orgName) {
+    console.log(`[Watermark] Processing video for ${orgName} at ${inputPath}`);
     const tempDir = os.tmpdir();
-    const inputPath = path.join(tempDir, `input-${Date.now()}.mp4`);
+    // Use input filename to preserve extension if possible, or default to mp4
     const outputPath = path.join(tempDir, `output-${Date.now()}.mp4`);
     const sigtrackLogoPath = path.join(tempDir, `sigtrack-${Date.now()}.png`);
     const orgLogoPath = path.join(tempDir, `org-${Date.now()}.png`);
 
     try {
-        fs.writeFileSync(inputPath, fileBuffer);
-        
         // Settings
         const LOGO_SIZE = 50;
         const PADDING = 20;
@@ -148,25 +146,24 @@ async function processVideo(fileBuffer, orgName) {
             command.complexFilter(filter)
                 .outputOptions('-c:a copy') // Copy audio
                 .on('end', () => {
-                    console.log(`[Watermark] Video processed successfully`);
-                    const outputBuffer = fs.readFileSync(outputPath);
-                    // Cleanup
-                    cleanup([inputPath, outputPath, sigtrackLogoPath, orgLogoPath]);
-                    resolve(outputBuffer);
+                    console.log(`[Watermark] Video processed successfully: ${outputPath}`);
+                    // Cleanup logos, but keep output
+                    cleanup([sigtrackLogoPath, orgLogoPath]);
+                    resolve(outputPath);
                 })
                 .on('error', (err) => {
                     console.error("[Watermark] FFmpeg error:", err);
-                    cleanup([inputPath, outputPath, sigtrackLogoPath, orgLogoPath]);
-                    // Return original on error
-                    resolve(fileBuffer);
+                    cleanup([outputPath, sigtrackLogoPath, orgLogoPath]);
+                    // Return original path on error
+                    resolve(inputPath);
                 })
                 .save(outputPath);
         });
 
     } catch (error) {
         console.error("[Watermark] Video processing setup error:", error);
-        cleanup([inputPath, outputPath, sigtrackLogoPath, orgLogoPath]);
-        return fileBuffer;
+        cleanup([outputPath, sigtrackLogoPath, orgLogoPath]);
+        return inputPath;
     }
 }
 
