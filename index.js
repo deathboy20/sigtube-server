@@ -155,13 +155,36 @@ app.get("/api/orgs/:orgName", async (req, res) => {
     }
 });
 
+// Get Org Config (JSON file with credentials and metadata)
+app.get("/api/orgs/:orgName/config", async (req, res) => {
+    const { orgName } = req.params;
+    try {
+        const configPath = `/organizations/${orgName}/config.json`;
+        const configContent = await owncloud.getFileContents(configPath);
+        const configData = JSON.parse(configContent.toString());
+        
+        console.log(`[OrgConfig] Retrieved config for ${orgName}`);
+        res.json(configData);
+    } catch (error) {
+        console.error(`[OrgConfig] Error retrieving config for ${orgName}:`, error);
+        if (error.response && error.response.status === 404) {
+            return res.status(404).json({ error: "Organization config not found" });
+        }
+        res.status(500).json({ error: "Failed to retrieve organization config", details: error.message });
+    }
+});
+
 // Create Organization
 app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
-  const { orgName } = req.body;
+  const { orgName, password, createdAt } = req.body;
   const logoFile = req.file;
 
   if (!orgName) {
     return res.status(400).json({ error: "Organization name is required" });
+  }
+
+  if (!password) {
+    return res.status(400).json({ error: "Organization password is required" });
   }
 
   try {
@@ -170,6 +193,19 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
     // Create subfolders
     await owncloud.createDirectory(`/organizations/${orgName}/videos`);
     await owncloud.createDirectory(`/organizations/${orgName}/images`);
+
+    // Create config.json with organization metadata
+    const configData = {
+      orgId: orgName,
+      password: password,
+      createdAt: createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      version: "1.0"
+    };
+
+    const configPath = `/organizations/${orgName}/config.json`;
+    await owncloud.putFileContents(configPath, JSON.stringify(configData, null, 2), { overwrite: true });
+    console.log(`[OrgCreate] Created config.json for ${orgName}`);
 
     // Upload logo if provided
     if (logoFile) {
@@ -180,7 +216,7 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
         fs.unlinkSync(logoFile.path);
     }
 
-    res.json({ success: true, message: `Organization ${orgName} created` });
+    res.json({ success: true, message: `Organization ${orgName} created with config` });
   } catch (error) {
     console.error("Create org error:", error);
     // Cleanup temp file if error

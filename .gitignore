@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 package-lock.json
 server.md
+/node_modules
+/node_modules
+/node_modules
