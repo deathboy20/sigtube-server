@@ -31,8 +31,34 @@ const upload = multer({
     }
 });
 
-// CORS Configuration
+// CORS Configuration - Allow requests from all origins
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : [
+      'http://localhost:5173',
+      'https://staging-sigtrack-admin-dashboard.vercel.app',
+      'https://sigtrack-admin-dashboard-a4q6.vercel.app',
+      'http://localhost:5000'
+    ];
 
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    console.log(`[CORS] Allowing request from: ${origin}`);
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  maxAge: 86400
+}));
+
+// Body parser middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Health check
 app.get("/api/health", async (req, res) => {
@@ -149,7 +175,35 @@ app.get("/api/orgs/:orgName/config", async (req, res) => {
     }
 });
 
-// Create Organization
+// Helper function to safely create directories (checks if they exist first)
+const createOrgDirectories = async (orgName) => {
+  const directories = [
+    `/organizations/${orgName}`,
+    `/organizations/${orgName}/videos`,
+    `/organizations/${orgName}/images`
+  ];
+
+  for (const dir of directories) {
+    try {
+      const exists = await owncloud.exists(dir);
+      if (!exists) {
+        await owncloud.createDirectory(dir);
+        console.log(`[OrgCreate] Created directory: ${dir}`);
+      } else {
+        console.log(`[OrgCreate] Directory already exists: ${dir}`);
+      }
+    } catch (error) {
+      // If 405, the directory already exists - this is okay
+      if (error.response && error.response.status === 405) {
+        console.log(`[OrgCreate] Directory already exists (405): ${dir}`);
+      } else {
+        throw error;
+      }
+    }
+  }
+};
+
+// Create Organization - Primary endpoint /api/orgs/create
 app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
   const { orgName, password, createdAt } = req.body;
   const logoFile = req.file;
@@ -163,11 +217,8 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
   }
 
   try {
-    // Create main org folder
-    await owncloud.createDirectory(`/organizations/${orgName}`);
-    // Create subfolders
-    await owncloud.createDirectory(`/organizations/${orgName}/videos`);
-    await owncloud.createDirectory(`/organizations/${orgName}/images`);
+    // Create directories (safely handles existing ones)
+    await createOrgDirectories(orgName);
 
     // Create config.json with organization metadata
     const configData = {
@@ -189,19 +240,76 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
         await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
         // Clean up temp file
         fs.unlinkSync(logoFile.path);
+        console.log(`[OrgCreate] Uploaded logo for ${orgName}`);
     }
 
-    res.json({ success: true, message: `Organization ${orgName} created with config` });
+    res.json({ success: true, message: `Organization ${orgName} created successfully` });
   } catch (error) {
     console.error("Create org error:", error);
     // Cleanup temp file if error
-    if (logoFile && fs.existsSync(logoFile.path)) fs.unlinkSync(logoFile.path);
-    
-    // 405 means it might already exist
-    if (error.response && error.response.status === 405) {
-        return res.json({ success: true, message: `Organization ${orgName} already exists` });
+    if (logoFile && fs.existsSync(logoFile.path)) {
+      try {
+        fs.unlinkSync(logoFile.path);
+      } catch (e) {
+        console.error("Failed to cleanup temp file:", e.message);
+      }
     }
-    res.status(500).json({ error: "Failed to create organization" });
+    res.status(500).json({ error: "Failed to create organization", details: error.message });
+  }
+});
+
+// Alias route without /api prefix for frontend compatibility
+app.post("/orgs/create", upload.single("logo"), async (req, res) => {
+  const { orgName, password, createdAt } = req.body;
+  const logoFile = req.file;
+
+  if (!orgName) {
+    return res.status(400).json({ error: "Organization name is required" });
+  }
+
+  if (!password) {
+    return res.status(400).json({ error: "Organization password is required" });
+  }
+
+  try {
+    // Create directories (safely handles existing ones)
+    await createOrgDirectories(orgName);
+
+    // Create config.json with organization metadata
+    const configData = {
+      orgId: orgName,
+      password: password,
+      createdAt: createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      version: "1.0"
+    };
+
+    const configPath = `/organizations/${orgName}/config.json`;
+    await owncloud.putFileContents(configPath, JSON.stringify(configData, null, 2), { overwrite: true });
+    console.log(`[OrgCreate] Created config.json for ${orgName}`);
+
+    // Upload logo if provided
+    if (logoFile) {
+        const logoPath = `/organizations/${orgName}/logo${path.extname(logoFile.originalname)}`;
+        const buffer = fs.readFileSync(logoFile.path);
+        await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
+        // Clean up temp file
+        fs.unlinkSync(logoFile.path);
+        console.log(`[OrgCreate] Uploaded logo for ${orgName}`);
+    }
+
+    res.json({ success: true, message: `Organization ${orgName} created successfully` });
+  } catch (error) {
+    console.error("Create org error:", error);
+    // Cleanup temp file if error
+    if (logoFile && fs.existsSync(logoFile.path)) {
+      try {
+        fs.unlinkSync(logoFile.path);
+      } catch (e) {
+        console.error("Failed to cleanup temp file:", e.message);
+      }
+    }
+    res.status(500).json({ error: "Failed to create organization", details: error.message });
   }
 });
 
