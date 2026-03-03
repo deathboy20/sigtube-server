@@ -9,7 +9,10 @@ const { owncloud } = require('./storage/owncloud');
 // Set ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-const SIGTRACK_LOGO_PATH = path.join(__dirname, 'assets', 'sigtrack-logo.svg');
+// Fallback to sigtrack-tube.png if sigtrack-logo.svg is missing
+const SIGTRACK_LOGO_PATH = fs.existsSync(path.join(__dirname, 'assets', 'sigtrack-logo.svg'))
+    ? path.join(__dirname, 'assets', 'sigtrack-logo.svg')
+    : path.join(__dirname, 'assets', 'sigtrack-tube.png');
 
 // Helper to get Org Logo Buffer
 async function getOrgLogoBuffer(orgName) {
@@ -25,13 +28,21 @@ async function getOrgLogoBuffer(orgName) {
 }
 
 // Helper to Create Rounded Logo with Transparency
-async function createRoundedLogo(inputBuffer, size = 70, opacity = 0.8) {
+async function createRoundedLogo(input, size = 70, opacity = 0.8) {
     try {
+        if (!input) return null;
+        
+        // If it's a string (path), check if it exists
+        if (typeof input === 'string' && !fs.existsSync(input)) {
+            console.warn(`[Watermark] Logo file not found: ${input}`);
+            return null;
+        }
+
         const rounded = Buffer.from(
             `<svg><rect x="0" y="0" width="${size}" height="${size}" rx="${size / 2}" ry="${size / 2}"/></svg>`
         );
 
-        return await sharp(inputBuffer)
+        return await sharp(input)
             .resize(size, size, { fit: 'cover' })
             .composite([{
                 input: rounded,
@@ -42,7 +53,7 @@ async function createRoundedLogo(inputBuffer, size = 70, opacity = 0.8) {
             .toBuffer();
     } catch (error) {
         console.error("Error creating rounded logo:", error);
-        return inputBuffer;
+        return null;
     }
 }
 
@@ -66,14 +77,21 @@ async function processImage(fileBuffer, orgName) {
             orgLogo = await createRoundedLogo(orgLogoBuffer, LOGO_SIZE, OPACITY);
         }
 
-        let composite = [
+        let composite = [];
+        
+        if (sigtrackLogo) {
             // SigTrack Logo: Top Right
-            { input: sigtrackLogo, gravity: 'northeast', top: PADDING, left: PADDING }
-        ];
+            composite.push({ input: sigtrackLogo, gravity: 'northeast', top: PADDING, left: PADDING });
+        }
 
         if (orgLogo) {
             // Org Logo: Top Left
             composite.push({ input: orgLogo, gravity: 'northwest', top: PADDING, left: PADDING });
+        }
+
+        if (composite.length === 0) {
+            console.log(`[Watermark] No logos to apply, skipping composite`);
+            return fileBuffer;
         }
 
         // Apply watermarks
@@ -106,44 +124,61 @@ async function processVideo(inputPath, orgName) {
 
         // Prepare Logos
         const sigtrackLogo = await createRoundedLogo(SIGTRACK_LOGO_PATH, LOGO_SIZE, OPACITY);
-        await sharp(sigtrackLogo).toFile(sigtrackLogoPath);
+        let hasSigtrackLogo = false;
+        if (sigtrackLogo) {
+            await sharp(sigtrackLogo).toFile(sigtrackLogoPath);
+            hasSigtrackLogo = true;
+        }
         
         const orgLogoBuffer = await getOrgLogoBuffer(orgName);
         let hasOrgLogo = false;
         if (orgLogoBuffer) {
              const orgLogo = await createRoundedLogo(orgLogoBuffer, LOGO_SIZE, OPACITY);
-             await sharp(orgLogo).toFile(orgLogoPath);
-             hasOrgLogo = true;
+             if (orgLogo) {
+                await sharp(orgLogo).toFile(orgLogoPath);
+                hasOrgLogo = true;
+             }
+        }
+
+        if (!hasSigtrackLogo && !hasOrgLogo) {
+            console.log(`[Watermark] No logos to apply for video, skipping`);
+            return inputPath;
         }
 
         return new Promise((resolve, reject) => {
             let command = ffmpeg(inputPath);
             
             // Inputs
-            // Input 0: Video
-            // Input 1: SigTrack Logo
-            command.input(sigtrackLogoPath);
-            
-            // Input 2: Org Logo (if exists)
+            if (hasSigtrackLogo) command.input(sigtrackLogoPath);
             if (hasOrgLogo) command.input(orgLogoPath);
 
-            // Filter Complex
-            // [0:v] is video. [1:v] is sigtrack. [2:v] is org.
-            
-            // SigTrack: Top Right (main_w - overlay_w - PADDING, PADDING)
-            // Org: Top Left (PADDING, PADDING)
-            
-            let filter = "";
-            
-            // Apply SigTrack (Input 1) to Top Right
-            filter += `[0:v][1:v]overlay=main_w-overlay_w-${PADDING}:${PADDING}`;
-            
-            if (hasOrgLogo) {
-                // If Org Logo exists, chain the output of first overlay [tmp]
-                filter += `[tmp];[tmp][2:v]overlay=${PADDING}:${PADDING}`;
+            // Redo filter logic more simply
+            let complexFilter = [];
+            let lastOutput = '0:v';
+            let nextInputIndex = 1;
+
+            if (hasSigtrackLogo) {
+                complexFilter.push({
+                    filter: 'overlay',
+                    options: `main_w-overlay_w-${PADDING}:${PADDING}`,
+                    inputs: [lastOutput, `${nextInputIndex}:v`],
+                    outputs: 'v1'
+                });
+                lastOutput = 'v1';
+                nextInputIndex++;
             }
-            
-            command.complexFilter(filter)
+
+            if (hasOrgLogo) {
+                complexFilter.push({
+                    filter: 'overlay',
+                    options: `${PADDING}:${PADDING}`,
+                    inputs: [lastOutput, `${nextInputIndex}:v`],
+                    outputs: 'v2'
+                });
+                lastOutput = 'v2';
+            }
+
+            command.complexFilter(complexFilter, lastOutput)
                 .outputOptions('-c:a copy') // Copy audio
                 .on('end', () => {
                     console.log(`[Watermark] Video processed successfully: ${outputPath}`);

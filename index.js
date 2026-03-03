@@ -27,38 +27,20 @@ const storage = multer.diskStorage({
 const upload = multer({ 
     storage: storage,
     limits: {
-        fileSize: 500 * 1024 * 1024, // Limit to 500MB (adjust as needed for Render plan)
+        fileSize: 10 * 1024 * 1024 * 1024, // Limit to 10GB
     }
 });
 
-// CORS Configuration - Allow requests from all origins
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
-  ? process.env.ALLOWED_ORIGINS.split(',') 
-  : [
-      'http://localhost:5173',
-      'https://staging-sigtrack-admin-dashboard.vercel.app',
-      'https://sigtrack-admin-dashboard-a4q6.vercel.app',
-      'http://localhost:5000'
-    ];
+// Increase server timeout for large uploads
+app.use((req, res, next) => {
+    // Set timeout to 1 hour for large files
+    req.setTimeout(3600000);
+    res.setTimeout(3600000);
+    next();
+});
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    console.log(`[CORS] Allowing request from: ${origin}`);
-    callback(null, true);
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  maxAge: 86400
-}));
+// CORS Configuration
 
-// Body parser middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 // Health check
 app.get("/api/health", async (req, res) => {
@@ -175,37 +157,9 @@ app.get("/api/orgs/:orgName/config", async (req, res) => {
     }
 });
 
-// Helper function to safely create directories (checks if they exist first)
-const createOrgDirectories = async (orgName) => {
-  const directories = [
-    `/organizations/${orgName}`,
-    `/organizations/${orgName}/videos`,
-    `/organizations/${orgName}/images`
-  ];
-
-  for (const dir of directories) {
-    try {
-      const exists = await owncloud.exists(dir);
-      if (!exists) {
-        await owncloud.createDirectory(dir);
-        console.log(`[OrgCreate] Created directory: ${dir}`);
-      } else {
-        console.log(`[OrgCreate] Directory already exists: ${dir}`);
-      }
-    } catch (error) {
-      // If 405, the directory already exists - this is okay
-      if (error.response && error.response.status === 405) {
-        console.log(`[OrgCreate] Directory already exists (405): ${dir}`);
-      } else {
-        throw error;
-      }
-    }
-  }
-};
-
-// Create Organization - Primary endpoint /api/orgs/create
+// Create Organization
 app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
-  const { orgName, password, createdAt } = req.body;
+  const { orgName, password, levels, createdAt } = req.body;
   const logoFile = req.file;
 
   if (!orgName) {
@@ -217,21 +171,29 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
   }
 
   try {
-    // Create directories (safely handles existing ones)
-    await createOrgDirectories(orgName);
+    // Check if organization already exists
+    const orgExists = await owncloud.exists(`/organizations/${orgName}`);
+    if (!orgExists) {
+        // Create main org folder
+        await owncloud.createDirectory(`/organizations/${orgName}`);
+        // Create subfolders
+        await owncloud.createDirectory(`/organizations/${orgName}/videos`);
+        await owncloud.createDirectory(`/organizations/${orgName}/images`);
+    }
 
     // Create config.json with organization metadata
     const configData = {
       orgId: orgName,
       password: password,
+      levels: levels ? JSON.parse(levels) : [],
       createdAt: createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      version: "1.0"
+      version: "1.1" // Bump version
     };
 
     const configPath = `/organizations/${orgName}/config.json`;
     await owncloud.putFileContents(configPath, JSON.stringify(configData, null, 2), { overwrite: true });
-    console.log(`[OrgCreate] Created config.json for ${orgName}`);
+    console.log(`[OrgCreate] Created/Updated config.json for ${orgName}`);
 
     // Upload logo if provided
     if (logoFile) {
@@ -240,76 +202,19 @@ app.post("/api/orgs/create", upload.single("logo"), async (req, res) => {
         await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
         // Clean up temp file
         fs.unlinkSync(logoFile.path);
-        console.log(`[OrgCreate] Uploaded logo for ${orgName}`);
     }
 
-    res.json({ success: true, message: `Organization ${orgName} created successfully` });
+    res.json({ success: true, message: `Organization ${orgName} created with config` });
   } catch (error) {
     console.error("Create org error:", error);
     // Cleanup temp file if error
-    if (logoFile && fs.existsSync(logoFile.path)) {
-      try {
-        fs.unlinkSync(logoFile.path);
-      } catch (e) {
-        console.error("Failed to cleanup temp file:", e.message);
-      }
+    if (logoFile && fs.existsSync(logoFile.path)) fs.unlinkSync(logoFile.path);
+    
+    // 405 means it might already exist
+    if (error.response && error.response.status === 405) {
+        return res.json({ success: true, message: `Organization ${orgName} already exists` });
     }
-    res.status(500).json({ error: "Failed to create organization", details: error.message });
-  }
-});
-
-// Alias route without /api prefix for frontend compatibility
-app.post("/orgs/create", upload.single("logo"), async (req, res) => {
-  const { orgName, password, createdAt } = req.body;
-  const logoFile = req.file;
-
-  if (!orgName) {
-    return res.status(400).json({ error: "Organization name is required" });
-  }
-
-  if (!password) {
-    return res.status(400).json({ error: "Organization password is required" });
-  }
-
-  try {
-    // Create directories (safely handles existing ones)
-    await createOrgDirectories(orgName);
-
-    // Create config.json with organization metadata
-    const configData = {
-      orgId: orgName,
-      password: password,
-      createdAt: createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      version: "1.0"
-    };
-
-    const configPath = `/organizations/${orgName}/config.json`;
-    await owncloud.putFileContents(configPath, JSON.stringify(configData, null, 2), { overwrite: true });
-    console.log(`[OrgCreate] Created config.json for ${orgName}`);
-
-    // Upload logo if provided
-    if (logoFile) {
-        const logoPath = `/organizations/${orgName}/logo${path.extname(logoFile.originalname)}`;
-        const buffer = fs.readFileSync(logoFile.path);
-        await owncloud.putFileContents(logoPath, buffer, { overwrite: true });
-        // Clean up temp file
-        fs.unlinkSync(logoFile.path);
-        console.log(`[OrgCreate] Uploaded logo for ${orgName}`);
-    }
-
-    res.json({ success: true, message: `Organization ${orgName} created successfully` });
-  } catch (error) {
-    console.error("Create org error:", error);
-    // Cleanup temp file if error
-    if (logoFile && fs.existsSync(logoFile.path)) {
-      try {
-        fs.unlinkSync(logoFile.path);
-      } catch (e) {
-        console.error("Failed to cleanup temp file:", e.message);
-      }
-    }
-    res.status(500).json({ error: "Failed to create organization", details: error.message });
+    res.status(500).json({ error: "Failed to create organization" });
   }
 });
 
@@ -619,38 +524,97 @@ app.get("/api/files/stream", async (req, res) => {
     }
 });
 
-// List Files
-app.get("/api/list/:org/:folder", async (req, res) => {
-  const { org, folder } = req.params;
-  const path = `/organizations/${org}/${folder}/`;
+// Delete file
+app.delete("/api/files/delete", express.json(), async (req, res) => {
+    const { path: filePath } = req.body;
+    if (!filePath) return res.status(400).json({ error: "File path is required" });
 
-  try {
-    const items = await owncloud.getDirectoryContents(path);
-    res.json(items);
-  } catch (error) {
-    console.error("List files error:", error);
-    res.status(500).json({ error: "Failed to list files" });
-  }
-});
-
-// Delete File
-app.delete("/api/files/delete", async (req, res) => {
-    const { path } = req.body;
-    if (!path) {
-        return res.status(400).json({ error: "Missing path" });
-    }
-    
     try {
-        if (await owncloud.exists(path)) {
-            await owncloud.deleteFile(path);
-            res.json({ success: true, message: "File deleted" });
-        } else {
-            res.status(404).json({ error: "File not found" });
+        await owncloud.deleteFile(filePath);
+        // Also try to delete metadata if exists
+        const metaPath = `${filePath}.meta.json`;
+        if (await owncloud.exists(metaPath)) {
+            await owncloud.deleteFile(metaPath);
         }
+        res.json({ success: true });
     } catch (error) {
         console.error("Delete file error:", error);
         res.status(500).json({ error: "Failed to delete file" });
     }
+});
+
+// Update file metadata
+app.post("/api/files/metadata", express.json(), async (req, res) => {
+    const { path: filePath, metadata } = req.body;
+    if (!filePath || !metadata) return res.status(400).json({ error: "File path and metadata are required" });
+
+    try {
+        const metaPath = `${filePath}.meta.json`;
+        await owncloud.putFileContents(metaPath, JSON.stringify(metadata, null, 2), { overwrite: true });
+        res.json({ success: true, message: "Metadata updated" });
+    } catch (error) {
+        console.error("Update metadata error:", error);
+        res.status(500).json({ error: "Failed to update metadata" });
+    }
+});
+
+// Get file metadata
+app.get("/api/files/metadata", async (req, res) => {
+    const { path: filePath } = req.query;
+    if (!filePath) return res.status(400).json({ error: "File path is required" });
+
+    try {
+        const metaPath = `${filePath}.meta.json`;
+        if (await owncloud.exists(metaPath)) {
+            const content = await owncloud.getFileContents(metaPath);
+            return res.json(JSON.parse(content.toString()));
+        }
+        res.status(404).json({ error: "Metadata not found" });
+    } catch (error) {
+        console.error("Get metadata error:", error);
+        res.status(500).json({ error: "Failed to get metadata" });
+    }
+});
+
+// List files with metadata support
+app.get("/api/list/:org/:folder", async (req, res) => {
+  const { org, folder } = req.params;
+  const directory = `/organizations/${org}/${folder}/`;
+
+  try {
+    const items = await owncloud.getDirectoryContents(directory);
+    
+    // Filter out .meta.json files from the main list, but we'll use them to enrich the main files
+    const mainFiles = items.filter(item => item.type === 'file' && !item.basename.endsWith('.meta.json'));
+    const metaFiles = items.filter(item => item.type === 'file' && item.basename.endsWith('.meta.json'));
+
+    const enrichedFiles = await Promise.all(mainFiles.map(async (file) => {
+        const metaFile = metaFiles.find(m => m.basename === `${file.basename}.meta.json`);
+        let metadata = null;
+        
+        if (metaFile) {
+            try {
+                const metaContent = await owncloud.getFileContents(metaFile.filename);
+                metadata = JSON.parse(metaContent.toString());
+            } catch (e) {
+                console.warn(`Failed to parse metadata for ${file.basename}`, e);
+            }
+        }
+        
+        return {
+            ...file,
+            metadata
+        };
+    }));
+
+    res.json(enrichedFiles);
+  } catch (error) {
+    console.error(`List ${folder} error for ${org}:`, error);
+    if (error.response && error.response.status === 404) {
+        return res.json([]);
+    }
+    res.status(500).json({ error: `Failed to list ${folder}` });
+  }
 });
 
 // Move/Rename File
