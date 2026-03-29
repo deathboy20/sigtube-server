@@ -39,7 +39,35 @@ app.use((req, res, next) => {
     next();
 });
 
-// CORS Configuration
+const defaultAllowedOrigins = [
+  "https://staging-sigtrackweb.sigtrackapp.com",
+  "https://prod-sigtrackweb.sigtrackapp.com",
+  "http://localhost:3000",
+  "http://localhost:5173",
+   "http://localhost:5174",
+    "http://localhost:5175",
+];
+
+const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS
+  ? process.env.CORS_ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean)
+  : defaultAllowedOrigins;
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error("CORS origin not allowed"));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Range", "If-None-Match", "If-Modified-Since"],
+  exposedHeaders: ["Content-Length", "Content-Range", "Accept-Ranges", "ETag"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 
 // Health check
